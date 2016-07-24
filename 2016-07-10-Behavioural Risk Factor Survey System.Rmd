@@ -1,0 +1,457 @@
+---
+output:
+  html_document:
+    theme: spacelab
+    highlight: haddock
+    code_folding: hide
+---
+
+## BFRSS Survey
+
+"The BRFSS objective is to collect uniform, state-specific data on preventive health practices and risk behaviors that are linked to chronic diseases, and preventable infectious diseases that affect the adult population"
+*(http://www.cdc.gov/brfss/annual_data/2014/pdf/overview_2014.pdf)*
+
+The 2013 BRFSS (Behavioral Risk Factor Surveillance System) data is collected by the CDC (Centers for Disease Control and Prevention). The population of the survey is Non-institutionalized adults (18 years and older) residing in the US and in participating US territories. The survey is conducted via land-line and cellular phones and asking the questionnaire from randomly selected households. After that the CDC edits, processes, weights and analyzes the data.
+
+The questionnaire questions are carefully considered and any yearly changes go through a rigorous process. Overall the survey seems extremely professionally planned, executed and documented. As this is a observational study, we can't infer causality from the data. We can only establish correlation between the variables.
+
+The data processing includes weighing on demographic variables that should decrease bias coming from non-coverage and non-response. In my opinion biggest possible bias comes from the difference between people who have the time and willingness to do the interview and those who don't. It takes an average of 20 to 30 minutes to go trough the questionnaire. Maybe people who answer it are more responsible in their lifestyle choices, or maybe the people who don't participate in these surveys also do more sports or are more social, or some other confounding variable.
+
+## Setup
+
+Load the needed packages and load and tidy data.
+
+```{r load-packages, message = FALSE}
+
+# Libraries and options
+library(knitr)
+opts_chunk$set(warning=F, message=F)
+
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(broom)
+library(plotly)
+library(scales)
+
+```
+
+
+```{r tidy-data}
+
+# Load data
+load("brfss2013.RData")
+
+# Data to tbl_df format
+df = tbl_df(brfss2013)
+# Remove original data frame from environment
+rm(brfss2013)
+
+# Date to lubridate format
+df$idate = mdy(df$idate)
+
+```
+
+
+## 1. Mental Health depending on Location and Time of the Year
+
+Are some states in better mental health than others? Does this have any relationship with the date of the interview? It is interesting to see if more northern states report feeling less well during the winter months.
+
+#### Data
+
+The main variable used is the number of days subject reported that their mental health was not good during the past 30 days.
+
+**Variables from original data set and accompanying explanation :**
+
+*X_state*: State FIPS Code
+State FIPS Code
+
+*imonth*: Interview Month
+Interview Month
+
+*menthlth*: Number Of Days Mental Health Not Good
+Now thinking about your mental health, which includes stress, depression, and problems with emotions, for how many days during the past 30 days was your mental health not good?
+
+To get the states ordered in north-south axes, I used the geographical centroid, not the center of population per state. In my opinion it causes less misunderstandings and we are looking for general trend here. I had to download some extra data for this. The links are in the code.
+
+
+```{r mental-tidy}
+
+# Tidy data
+
+# Select needed variables
+mental = select(df, state = X_state, month = imonth, mental = menthlth)
+# Remove observations with NA in mental
+mental = filter(mental, complete.cases(mental$mental))
+# Remove observations with more than 30 days reported in a month
+mental = filter(mental, mental <= 30)
+# Remove "0" and '80' levels from states factor
+stateLevels = data_frame(states = levels(mental$state)[levels(mental$state) != '0' &
+                                  levels(mental$state) !=80])
+
+# Re-level the state factor for plotting by latitude
+
+# Download coordinates
+stateCoordinates = read_csv('https://dev.maxmind.com/static/csv/codes/state_latlon.csv')
+# Download data to map state abbreviations to full names
+stateNames = read.table('http://www2.census.gov/geo/docs/reference/state.txt',
+                        sep = '|' ,
+                        stringsAsFactors = F)
+# Join tables
+stateCoordinates = left_join(stateCoordinates, stateNames, by = c('state' = 'V2'))
+# Remove unnecessary columns
+stateCoordinates = select(stateCoordinates, state = V3, latitude)
+# Join with original data and arrange by latitude
+stateLevels = left_join(
+    data_frame(state = as.character(unique(mental$state))),
+    stateCoordinates,
+    by = c('state' = 'state')) %>%
+  arrange(desc(latitude))
+
+# Re-level state factor, north first
+mental = mutate(mental, state = factor(state, levels = stateLevels$state))
+
+```
+
+#### Mental Health Per State
+
+Let's first examine if there are big differences on self-reported mental health and their place of residence.
+
+```{r mental-state}
+
+# Mental health by state and calculate mean
+mentalState = mental %>%
+  group_by(state) %>%
+  summarise(meanMental = round(mean(mental), 2)) %>%
+  arrange(desc(meanMental))
+
+# Print summary of mean reported days when not in good mental health per state
+kable(tidy(summary(mentalState$meanMental)),
+      caption = 'Summary statistics of days when not in good mental health per state')
+
+# Print 5 states with lowest mean reported days when not in good mental health
+kable(head(arrange(mentalState, meanMental), 5),
+      caption = 'States with lowest average of days when not in good mental health')
+
+# Print 5 states with highest mean reported days when not in good mental health
+kable(head(mentalState, 5),
+      caption = 'States with highest average of days when not in good mental health')
+
+```
+
+We can quite confidently say, based on the above statistics alone, that there is a meaningful difference between mental health between states. Looking at the top 5 charts, latitude does not explain it.
+
+#### Mental Health per Month
+
+Let's get the average bad days reported by whole sample grouped by the interview month. Here we have to remember that the question considers the last 30 days. So this analysis isn't trying to tell how people feel on the exact calendar month. But we should get some kind of an idea, if there are any yearly patterns.
+
+```{r mental-month}
+
+# Mental health by month
+mentalMonth = mental %>%
+  group_by(month) %>%
+  summarise(meanMental = round(mean(mental), 2)) %>%
+  arrange(desc(meanMental))
+
+# Print mean reported days when not in good mental condition per state
+kable(mentalMonth,
+      caption = 'Mean bad days per month')
+
+```
+
+#### Mental Health by State per Month the Interview Took Place
+
+Looking at the above numbers, there is not big differences on mental health depending on the time of the year. Let's see if there are any discernible patterns when we look at average bad days by state during different months.
+
+```{r mental-state-month}
+
+# Mental health by state per month
+mentalStateMonth = mental %>%
+  group_by(state, month) %>%
+  summarise(meanMental = round(mean(mental), 2)) %>%
+  arrange(desc(meanMental))
+
+# Scatter plot of average bad days by state, colored by month
+p1.mental = ggplot(mentalStateMonth,
+                  aes(meanMental, state, col = month)) +
+                  geom_point(alpha = 1/2) +
+                  geom_vline(xintercept = mean(mental$mental)) +
+                  ylim(rev(levels(mentalStateMonth$state))) +
+                  theme(axis.text.y = element_text(size = 6),
+                        axis.title.y=element_text(vjust = 0.5)) +
+                  labs(title = 'Average Bad Days in the last 30 days (hover for details)',
+                        y = 'State (descending by latitude)',
+                        x = 'Days (mean)')
+
+# Print interactive plot with plotly
+ggplotly(p1.mental)
+
+```
+
+There seems to be no clear patterns on mental health and time of the year, even when we take into account the different locations. It maybe looks that the more south we go, people are having more not good days. We would need to perform statistical tests to get more certainty.
+
+
+## 2. How different sport activities correlate with mental and physical health?
+
+It is interesting to see are practitioners of some activities doing better physically and mentally. Here we have to be especially careful of not mixing causality and correlation. Many confounding variables are possible. Subject's age comes to mind first as an example. People tend to have different hobbies in different ages and could have different types of problems depending on age.
+
+#### Data
+
+The sample is grouped into people who have exercised during the last 30 days and to those who have not. For the first group there is activity type of their main activity and amount of minutes spent doing it during the last week. Mental and physical health is measured by days of not feeling good during the last 30 days.
+
+**Variables from original data set and accompanying explanation :**
+
+*exerany2*: Exercise In Past 30 Days
+During the past month, other than your regular job, did you participate in any physical activities or exercises such as running, calisthenics, golf, gardening, or walking for exercise?
+
+*exract11*: Type Of Physical Activity
+What type of physical activity or exercise did you spend the most time doing during the past month?
+
+*padur1_*: Minutes Of Physical Activity Per Week For First Activity
+
+*physhlth*: Number Of Days Physical Health Not Good
+Now thinking about your physical health, which includes physical illness and injury, for how many days during the past 30 days was your physical health not good?
+
+*menthlth*: Number Of Days Mental Health Not Good
+Now thinking about your mental health, which includes stress, depression, and problems with emotions, for how many days during the past 30 days was your mental health not good?
+
+
+```{r sports-tidy}
+
+# Tidy data
+
+# Select needed variables
+exercise = select(df,
+                exercise = exerany2,
+                sport = exract11,
+                minutes = padur1_,
+                physical = physhlth,
+                mental = menthlth
+                )
+
+# Data set with only the observations that exercise
+sports = filter(exercise, exercise == 'Yes') %>%
+  select(-exercise)
+# Remove NAs and 'Other' category
+sports = filter(sports, complete.cases(sports), sport != 'Other')
+
+```
+
+#### Exercising versus Non-exercising Groups
+
+First check is to see if there are differences between exercising and non-exercising groups via calculating mean number of days for exercising and non-exercising groups.
+
+```{r exercise}
+
+# Difference in physical and mental health between people who exercise and don't
+exerciseStats = exercise %>%
+  group_by(exercise) %>%
+  summarise(n = n(),
+            badPhysical = round(mean(physical, na.rm = T), 2),
+            badMental = round(mean(mental, na.rm = T), 2)
+            )
+
+# Print statistics between exercising, non-exercising and NA groups
+kable(exerciseStats,
+      caption = 'Wellbeing between exercising, non-exercising and NA groups')
+
+```
+
+Nothing shocking there. People who exercise have noticeably less physical and mental bad days. Here is a good place to think the chicken-or-egg causality dilemma though.
+
+#### Physical and Mental Wellbeing in Relation to Activity Categories
+
+Are certain types of activities correlated with increase or decrease in wellbeing? First we count number of subjects per activity and remove the ones with less than 100 subjects, so that we can concentrate on the more common activity groups. Let's also check summary data.
+
+```{r sports-summary}
+
+# Add a column of sample size per sport
+sportStats = sports %>%
+  group_by(sport) %>%
+  summarise(n = n(),
+            frac = round(n() / nrow(sports), 2),
+            minutes = round(mean(minutes), 0),
+            physical = round(mean(physical), 2),
+            mental = round(mean(mental), 2)
+            )
+
+# Remove sports where sample is smaller than 100 and arrange by popularity
+sportStats = filter(sportStats, n > 100) %>%
+  arrange(desc(n))
+
+# Print 10 most popular activities
+kable(head(sportStats, 10), caption = '10 most popular activities and their statistics')
+
+# Print summary tables
+kable(round(tidy(summary(sportStats$minutes)), 0),
+      caption = 'Minutes in week summary')
+kable(round(tidy(summary(sportStats$physical)), 2),
+      caption = 'Physical bad days summary')
+kable(round(tidy(summary(sportStats$mental)), 2),
+      caption = 'Mental bad days summary')
+
+```
+
+Among the active group, people spend on average 110 minutes doing their favorite activity. The spread of time spent variable is considerable. The interquartile range for physical and mental bad days is quite tight. Let's make a histograms to check how the distributions look.
+
+```{r exercise-plot}
+
+# Histogram of bad mental days
+ggplot(sports, aes(mental)) +
+  geom_histogram(bins = 30) +
+  scale_x_continuous(breaks = 0:30) +
+  labs(title = 'Bad Mental Days',
+       x = 'Days per 30 days')
+
+
+# Histogram of bad physical days
+ggplot(sports, aes(physical)) +
+  geom_histogram(bins = 30) +
+  scale_x_continuous(breaks = 0:30) +
+    labs(title = 'Bad Mental Days',
+       x = 'Days per 30 days')
+
+```
+
+Majority of people who exercise don't have bad days at all, or just one or two per month. Then on both categories there is another clear group who is having problems every day.
+
+Let's combine the variables and see if there are activities where people feel very well or bad mentally and physically.
+
+```{r sports-plot2}
+
+# Plot physical and mental bad days per sport
+p.sports1 = plot_ly(sportStats, x = physical, y = mental,
+        text = paste(sportStats$sport, ',',
+                     'minutes =', sportStats$minutes, ',',
+                     'n = ', sportStats$n),
+        mode = 'markers',
+        textfont = t,
+        textposition = 'top middle') %>%
+        layout(title = 'Physical and Mental Bad Days per Activity (hover for details)')
+
+# Print interactive plot
+p.sports1
+
+```
+
+
+Upper Body Cycle, household activities and fishing are the ones having most physical problems. Skateboarding and childcare seem to be worst mentally. People who do racquetball, tennis or golf seem to be doing the best.
+
+## 3. Is there a relationship between economic wellbeing and alcohol consumption?
+
+This is socially and politically an important question. Alcohol consumption has been proven to affect many health conditions adversely. Let's see if income class is related to this problem.
+
+#### Data
+
+Variable income categories refers to the households income. The questions about amount of drinks are personal. This is a clear problem. Keeping that in mind, let us see what the data tells us.
+
+We use five income classes. They are in thousands of dollars, so "<15" - class means households that earn less than 15,000 dollars per year. One thing to note here; the income is per household, but alcohol consumption is a personal question for the adult taking the survey from that household.
+
+**Variables from original data set and accompanying explanation :**
+
+*avedrnk2*: Avg Alcoholic Drinks Per Day In Past 30
+One drink is equivalent to a 12-ounce beer, a 5-ounce glass of wine, or a drink with one shot of liquor. During the past 30 days, on the days when you drank, about how many drinks did you drink on the average? (A 40 ounce beer would count as 3 drinks, or a cocktail drink with 2 shots would count as 2 drinks.)
+
+*X_incomg*: Computed Income Categories (five instead of 8 categories in the questionnaire)
+Is your annual household income from all sources: (If respondent refuses at any income level, code ???Refused.???)
+
+
+```{r alco-tidy}
+
+# Select only needed variables (use computed income class with 5 levels)
+alco = select(df, drinks = avedrnk2, income = X_incomg)
+
+# Remove if NA in income (71426 of 491775 original observations)
+alco = filter(alco, complete.cases(alco$income))
+
+# No alcohol consumed and refused/missing (23309) are all coded as NA in the data, so we don't remove those, but use 0
+alco$drinks[is.na(alco$drinks)] = 0
+
+# Tidy income labels
+levels(alco$income) = c("<15", "15-25", "25-35", "35-50", ">50")
+
+```
+
+#### Whole Sample, including people who haven't drank in the last 30 days
+
+
+
+```{r alco-all}
+
+# Descriptive statistics per income class
+alcoStats = alco %>%
+  group_by(income) %>%
+  summarise(population = n(),
+            totalDrinks = sum(drinks),
+            drinksPerDay = round(mean(drinks), 2),
+            nonDrinkers = round(sum(drinks == 0) / n(), 2),
+            iqrDrinks = IQR(drinks)
+  )
+
+# Print statistics
+kable(alcoStats,
+      caption = 'Statistics of whole population per income class')
+
+# Histogram of percentages of daily drinks per income class
+# few subjects drinking more than 10 per day are removed to make the plot more readable
+p.alco1 = filter(alco, drinks <= 10) %>%
+  ggplot(aes(drinks)) +
+    geom_histogram(aes(y = (..count..)/tapply(..count..,..PANEL..,sum)[..PANEL..]),
+                   bins = 10) +
+    scale_y_continuous(labels = scales::percent) +
+    scale_x_continuous(breaks = 0:10) +
+    facet_grid(income ~ .) +
+    labs(title = '0-10 Drinks per Day per Income class',
+         x = 'Average number of drinks per day',
+         y = 'Percentage per income class')
+
+# Print histograms statistics
+p.alco1
+kable(alcoStats,
+      caption = 'Statistics of whole population per income class')
+```
+
+The distribution of average drinks per day is right-skewed in all income classes. There is a positive linear trend in the amount of drinks, when income raises. At the same time amount of non-drinkers gets smaller with higher income class.
+
+#### People who have drank at least one drink in the last 30 days
+
+The percentage of people who don't drink varies a lot across income classes. Let's run the same analysis on subjects who have had at least one drink.
+
+```{r alco-drinkers}
+
+# Data set without non-drinkers
+alco2 = filter(alco, drinks > 0)
+
+# Histogram of percentaages of daily drinks per income class
+# people drinking more than 10 per day are removed to make the plot more readable
+
+p.alco2 = filter(alco2, drinks < 10) %>%
+  ggplot(aes(drinks)) +
+    geom_histogram(aes(y = (..count..)/tapply(..count..,..PANEL..,sum)[..PANEL..]),
+             bins = 10) +
+    scale_y_continuous(labels = scales::percent) +
+    scale_x_continuous(breaks = 0:10) +
+    facet_grid(income ~ .) +
+    labs(title = '1-10 Drinks per Day per Income class',
+         x = 'Average number of drinks per day', y = 'Percentage per income class')
+
+# Descriptive statistics per income class
+alcoStats2 = alco2 %>%
+  group_by(income) %>%
+  summarise(population = n(),
+            totalDrinks = sum(drinks),
+            drinksPerDay = round(mean(drinks), 2),
+            nonDrinkers = round(sum(drinks == 0) / n(), 2),
+            iqrDrinks = IQR(drinks)
+  )
+
+# Print plot and statistics
+p.alco2
+kable(alcoStats2,
+      caption = 'Statistics of people using alcohol per income class')
+
+```
+
+The relationship between income class and alcohol consumption is completely opposite now. It seems that there is a link between income class and alcohol use. Based on exploratory analysis it looks like subjects who drink, are drinking more the less they earn. It would be interesting to do more graphs with different parameters. For example, decide a number of daily drinks that starts to be problematic and look at the patterns then.
+
